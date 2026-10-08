@@ -1,40 +1,66 @@
+import sqlite3
 from nba_api.stats.endpoints import leaguegamefinder, boxscoretraditionalv3
 from nba_api.stats.static import teams
+from database import DB_NAME, init_db
 
-# 1. Lookup Lakers franchise ID
+# Ensure tables exist
+init_db()
+
+# 1. Lookup Lakers franchise metadata
 lakers = teams.find_team_by_abbreviation("LAL")
 team_id = lakers["id"]
-print(f"Connecting to NBA Stats API for {lakers['full_name']} (ID: {team_id})...")
 
-# 2. Query recent games played by the Lakers
+# 2. Query recent games
 finder = leaguegamefinder.LeagueGameFinder(team_id_nullable=team_id)
 games = finder.get_data_frames()[0]
-
-# 3. Pull latest game metadata
 latest_game = games.iloc[0]
 game_id = latest_game["GAME_ID"]
 
-print("\n" + "=" * 55)
-print(f"Matchup: {latest_game['MATCHUP']} | Date: {latest_game['GAME_DATE']}")
-print(f"Result:  {latest_game['WL']} ({latest_game['PTS']} PTS)")
-print("=" * 55 + "\n")
+print(f"\nProcessing Game: {latest_game['MATCHUP']} ({latest_game['GAME_DATE']})")
 
-# 4. Fetch using V3 endpoint
+# 3. Fetch Boxscore
 box = boxscoretraditionalv3.BoxScoreTraditionalV3(game_id=game_id)
 player_stats = box.player_stats.get_data_frame()
 
-# 5. Filter for Lakers players who logged minutes
+# Filter active players who logged minutes
 lakers_stats = player_stats[
-    (player_stats["teamId"] == team_id) & (player_stats["minutes"].notnull())
-]
+    (player_stats["teamId"] == team_id) & (player_stats["minutes"].str.len() > 0)
+].copy()
 
-# 6. Format and display
-columns = ["firstName", "familyName", "minutes", "points", "reboundsTotal", "assists", "plusMinusPoints"]
-df_display = lakers_stats[columns].copy()
-df_display["PLAYER"] = df_display["firstName"] + " " + df_display["familyName"]
+# 4. Persist to SQLite Database
+conn = sqlite3.connect(DB_NAME)
+cursor = conn.cursor()
 
-clean_view = df_display[["PLAYER", "minutes", "points", "reboundsTotal", "assists", "plusMinusPoints"]].rename(
-    columns={"minutes": "MIN", "points": "PTS", "reboundsTotal": "REB", "assists": "AST", "plusMinusPoints": "+/-"}
-)
+# Insert/Update Team
+cursor.execute("""
+INSERT OR IGNORE INTO teams (id, abbreviation, full_name)
+VALUES (?, ?, ?)
+""", (team_id, lakers["abbreviation"], lakers["full_name"]))
 
-print(clean_view.to_string(index=False))
+# Insert/Update Game
+cursor.execute("""
+INSERT OR REPLACE INTO games (id, game_date, matchup, wl, points)
+VALUES (?, ?, ?, ?, ?)
+""", (game_id, latest_game["GAME_DATE"], latest_game["MATCHUP"], latest_game["WL"], int(latest_game["PTS"])))
+
+# Insert Player Rows
+for _, row in lakers_stats.iterrows():
+    player_full_name = f"{row['firstName']} {row['familyName']}"
+    cursor.execute("""
+    INSERT INTO player_stats (game_id, team_id, player_name, minutes, points, rebounds, assists, plus_minus)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """, (
+        game_id,
+        team_id,
+        player_full_name,
+        row["minutes"],
+        int(row["points"]),
+        int(row["reboundsTotal"]),
+        int(row["assists"]),
+        float(row["plusMinusPoints"]) if row["plusMinusPoints"] is not None else 0.0
+    ))
+
+conn.commit()
+conn.close()
+
+print(f"[DB] Successfully inserted {len(lakers_stats)} player records for game {game_id} into SQLite.")
