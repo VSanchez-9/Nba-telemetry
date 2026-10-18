@@ -1,0 +1,4 @@
+flask
+requests
+nba_api
+pandas

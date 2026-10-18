@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NBA Fan Hub</title>
+<style>
+  :root { --accent:#552583; --bg:#f6f5f8; --card:#fff; --text:#1a1a1f; --muted:#6b6b76; --line:#e3e1e8; }
+  @media (prefers-color-scheme: dark) { :root { --bg:#121216; --card:#1c1c22; --text:#f1f0f5; --muted:#9a99a6; --line:#2b2b33; } }
+  * { box-sizing:border-box; }
+  body { margin:0; font:15px/1.45 system-ui,sans-serif; background:var(--bg); color:var(--text); }
+  header { background:var(--accent); color:#fff; padding:14px 20px; display:flex; gap:14px; align-items:center; flex-wrap:wrap; }
+  header img { width:40px; height:40px; }
+  header h1 { margin:0; font-size:20px; flex:1; }
+  select { padding:8px 10px; border-radius:8px; border:0; font-size:15px; }
+  #scores { display:flex; gap:10px; overflow-x:auto; padding:12px 20px; }
+  .game { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:8px 12px; min-width:150px; font-size:13px; }
+  .game.live { border-color:#e5384d; }
+  .game .row { display:flex; justify-content:space-between; gap:8px; align-items:center; }
+  .game img { width:18px; height:18px; vertical-align:middle; margin-right:4px; }
+  .muted { color:var(--muted); font-size:12px; }
+  nav { display:flex; gap:6px; padding:0 20px; border-bottom:1px solid var(--line); overflow-x:auto; }
+  nav button { background:none; border:0; padding:12px 14px; font-size:15px; color:var(--muted); cursor:pointer; border-bottom:3px solid transparent; }
+  nav button.on { color:var(--text); border-color:var(--accent); font-weight:600; }
+  main { padding:16px 20px; max-width:900px; margin:0 auto; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:12px 14px; margin-bottom:10px; }
+  .card a { color:var(--text); text-decoration:none; font-weight:600; }
+  .card a:hover { text-decoration:underline; }
+  .quote { margin-top:8px; padding-left:10px; border-left:3px solid var(--accent); color:var(--muted); font-size:14px; }
+  .flair { background:var(--accent); color:#fff; border-radius:99px; padding:1px 8px; font-size:11px; margin-right:6px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(220px,1fr)); gap:10px; }
+  .grid .card { padding:0; overflow:hidden; }
+  .grid img { width:100%; display:block; max-height:300px; object-fit:cover; }
+  .grid .cap { padding:8px 10px; font-size:13px; }
+  table { width:100%; border-collapse:collapse; }
+  th, td { text-align:right; padding:8px 6px; border-bottom:1px solid var(--line); }
+  th:first-child, td:first-child { text-align:left; }
+  .err { color:#e5384d; }
+  .who { display:flex; gap:8px; align-items:center; margin-bottom:6px; }
+  .who img { width:32px; height:32px; border-radius:50%; background:var(--line); }
+  .post { white-space:pre-wrap; overflow-wrap:anywhere; }
+  .pics { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:6px; margin-top:8px; }
+  .pics img { width:100%; max-height:260px; object-fit:cover; border-radius:8px; display:block; }
+</style>
+</head>
+<body>
+<header>
+  <img id="logo" alt="">
+  <h1 id="title">NBA Fan Hub</h1>
+  <select id="team" aria-label="Pick a team"></select>
+</header>
+<div id="scores"></div>
+<nav id="tabs"></nav>
+<main id="view"></main>
+
+<script>
+const TABS = { stories:"Stories", fans:"Fan Talk", buzz:"Bluesky", memes:"Memes", stats:"Box Score" };
+let teams = [], team = null, tab = "stories", timers = [];
+
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const api = async path => { const r = await fetch(path); const j = await r.json(); if (!r.ok) throw new Error(j.error || r.status); return j; };
+const ago = d => { const m = Math.round((Date.now() - new Date(d)) / 60000); return m < 60 ? m + "m ago" : m < 1440 ? Math.round(m/60) + "h ago" : Math.round(m/1440) + "d ago"; };
+
+async function init() {
+  teams = await api("/api/teams");
+  const sel = document.getElementById("team");
+  sel.innerHTML = teams.map(t => `<option value="${t.abbr}">${esc(t.full)}</option>`).join("");
+  const saved = localStorage.getItem("team") || "LAL";
+  sel.value = teams.some(t => t.abbr === saved) ? saved : teams[0].abbr;
+  sel.onchange = () => pick(sel.value);
+  document.getElementById("tabs").innerHTML = Object.entries(TABS).map(([k, v]) => `<button data-t="${k}">${v}</button>`).join("");
+  document.getElementById("tabs").onclick = e => { if (e.target.dataset.t) { tab = e.target.dataset.t; render(); } };
+  pick(sel.value);
+  setInterval(loadScores, 30000);   // live scores every 30s
+  setInterval(render, 120000);      // refresh the feed every 2 min
+}
+
+function pick(abbr) {
+  team = teams.find(t => t.abbr === abbr);
+  try { localStorage.setItem("team", abbr); } catch {}
+  document.documentElement.style.setProperty("--accent", team.color);
+  document.getElementById("logo").src = team.logo;
+  document.getElementById("title").textContent = team.full + " Fan Hub";
+  loadScores(); render();
+}
+
+async function loadScores() {
+  const el = document.getElementById("scores");
+  try {
+    const games = await api("/api/scores");
+    el.innerHTML = games.length ? games.map(g => `
+      <div class="game ${g.state === "in" ? "live" : ""}">
+        <div class="muted">${g.state === "in" ? "● LIVE · " : ""}${esc(g.status)}</div>
+        <div class="row"><span><img src="${esc(g.away.logo)}" alt="">${esc(g.away.abbr)}</span><b>${esc(g.away.score)}</b></div>
+        <div class="row"><span><img src="${esc(g.home.logo)}" alt="">${esc(g.home.abbr)}</span><b>${esc(g.home.score)}</b></div>
+      </div>`).join("") : `<span class="muted">No games on the scoreboard right now.</span>`;
+  } catch (e) { el.innerHTML = `<span class="err">Scores unavailable: ${esc(e.message)}</span>`; }
+}
+
+async function render() {
+  document.querySelectorAll("#tabs button").forEach(b => b.classList.toggle("on", b.dataset.t === tab));
+  const v = document.getElementById("view");
+  const t = team, mine = tab;
+  v.innerHTML = `<p class="muted">Loading…</p>`;
+  try {
+    let html = "";
+    if (tab === "stories") {
+      const items = await api("/api/news?team=" + encodeURIComponent(t.full));
+      html = items.map(n => `<div class="card"><a href="${esc(n.link)}" target="_blank" rel="noopener">${esc(n.title)}</a>
+        <div class="muted">${esc(n.source || "")} · ${ago(n.date)}</div></div>`).join("");
+    } else if (tab === "fans") {
+      if (!t.sub) throw new Error("No subreddit mapped for this team yet");
+      const posts = await api("/api/fans?sub=" + encodeURIComponent(t.sub));
+      html = posts.map(p => `<div class="card">
+        ${p.flair ? `<span class="flair">${esc(p.flair)}</span>` : ""}<a href="${esc(p.url)}" target="_blank" rel="noopener">${esc(p.title)}</a>
+        <div class="muted">▲ ${p.score} · ${p.comments} comments · r/${esc(t.sub)}</div>
+        ${p.top_comment ? `<div class="quote">“${esc(p.top_comment.body)}” <span class="muted">▲ ${p.top_comment.score}</span></div>` : ""}</div>`).join("");
+    } else if (tab === "buzz") {
+      const posts = await api("/api/buzz?team=" + encodeURIComponent(t.full));
+      html = posts.map(p => `<div class="card">
+        <div class="who">${p.avatar ? `<img src="${esc(p.avatar)}" alt="" loading="lazy">` : ""}
+          <div><b>${esc(p.author)}</b> <span class="muted">@${esc(p.handle)} · ${ago(p.date)}</span></div></div>
+        <div class="post">${esc(p.text)}</div>
+        ${p.images.length ? `<div class="pics">${p.images.map(i => `<a href="${esc(i.full)}" target="_blank" rel="noopener"><img src="${esc(i.thumb)}" alt="${esc(i.alt)}" loading="lazy"></a>`).join("")}</div>` : ""}
+        <div class="muted" style="margin-top:6px">♥ ${p.likes} · ↻ ${p.reposts} · 💬 ${p.replies} · <a href="${esc(p.url)}" target="_blank" rel="noopener">View on Bluesky</a></div></div>`).join("")
+        || `<p class="muted">No Bluesky posts about the ${esc(t.full)} in the last few days.</p>`;
+    } else if (tab === "memes") {
+      const m = await api("/api/memes?team=" + encodeURIComponent(t.name));
+      html = m.length ? `<div class="grid">${m.map(x => `<div class="card"><a href="${esc(x.link)}" target="_blank" rel="noopener">
+        <img src="${esc(x.img)}" alt="" loading="lazy"></a><div class="cap">${esc(x.title)} <span class="muted">▲ ${x.score}</span></div></div>`).join("")}</div>`
+        : `<p class="muted">No fresh ${esc(t.name)} memes this week.</p>`;
+    } else {
+      const s = await api("/api/stats?abbr=" + t.abbr);
+      html = !s.game ? `<p class="muted">No box scores saved for ${esc(t.full)} yet. Run the ingest script for this team.</p>` :
+        `<h3>${esc(s.game.matchup)} · ${esc(s.game.game_date)} · ${esc(s.game.wl || "")}</h3>
+        <div class="card"><table><tr><th>Player</th><th>MIN</th><th>PTS</th><th>REB</th><th>AST</th><th>+/-</th></tr>
+        ${s.players.map(p => `<tr><td>${esc(p.player_name)}</td><td>${esc(p.minutes)}</td><td>${p.points}</td><td>${p.rebounds}</td><td>${p.assists}</td><td>${p.plus_minus}</td></tr>`).join("")}</table></div>`;
+    }
+    if (t === team && mine === tab) v.innerHTML = html || `<p class="muted">Nothing here yet.</p>`;
+  } catch (e) { if (t === team && mine === tab) v.innerHTML = `<p class="err">Couldn't load this feed: ${esc(e.message)}</p>`; }
+}
+
+init();
+</script>
+</body>
+</html>
